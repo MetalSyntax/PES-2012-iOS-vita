@@ -2,11 +2,15 @@
 // UIApplicationMain y nunca vuelve).
 #include <psp2/apputil.h>
 #include <psp2/common_dialog.h>
+#include <psp2/io/devctl.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/power.h>
 #include <psp2/system_param.h>
+#include <kubridge.h>
+#include <psp2/io/fcntl.h>
+#include <psp2/kernel/threadmgr.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -26,6 +30,7 @@ unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024; // iOS: 1 MB el hilo 
 void darwin_init(void);
 void objc_rt_init(void);
 void uikit_init(void);
+void storekit_init(void);
 void ios5_init(void);
 
 static int next_log_number(void) {
@@ -64,6 +69,28 @@ static uintptr_t find_main_from_start(uintptr_t start) {
     return 0;
 }
 
+// diagnóstico #086: el proceso queda congelado (pantalla negra) a los ~15 s sin dump: ¿excepción cuyo coredump
+// no termina? Se registra el contexto con E/S cruda (sin el mutex del log) y sigue el manejo normal.
+static KuKernelExceptionHandler exc_old[3];
+static void exc_handler(KuKernelExceptionContext *c) {
+    SceUID fd = sceIoOpen(DATA_PATH "logs/exc.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+    char b[256];
+    int n = snprintf(b, sizeof(b), "[%llu] exc %u tid=0x%x pc=%08x lr=%08x sp=%08x far=%08x fsr=%x\n",
+                     sceKernelGetProcessTimeWide() / 1000, (unsigned)c->exceptionType, sceKernelGetThreadId(),
+                     (unsigned)c->pc, (unsigned)c->lr, (unsigned)c->sp, (unsigned)c->FAR, (unsigned)c->FSR);
+    sceIoWrite(fd, b, n);
+    const uint32_t *r = &c->r0;
+    n = snprintf(b, sizeof(b), "r0-r12: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                 r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12]);
+    sceIoWrite(fd, b, n);
+    sceIoClose(fd);
+    // al retornar, kubridge reintenta la instrucción: sin manejador, el reintento va al coredump normal
+    if (c->exceptionType < 3 && exc_old[c->exceptionType])
+        exc_old[c->exceptionType](c);
+    else
+        kuKernelReleaseExceptionHandler(c->exceptionType);
+}
+
 int main(void) {
     scePowerSetArmClockFrequency(444);
     scePowerSetBusClockFrequency(222);
@@ -73,6 +100,14 @@ int main(void) {
     char log_path[128];
     snprintf(log_path, sizeof(log_path), LOGS_PATH PORT_SLUG "_%03d.log", next_log_number());
     log_open(log_path);
+    sceIoRemove(DATA_PATH "logs/exc.txt");
+    for (int i = 0; i < 3; i++)
+        kuKernelRegisterExceptionHandler(i, exc_handler, &exc_old[i], NULL);
+    { // diagnóstico #083: el proceso deja de escribir a los ~15 s sin dump; ¿ux0 lleno?
+        struct { uint64_t max, free; uint32_t cluster; void *unk; } df;
+        if (sceIoDevctl("ux0:", 0x3001, NULL, 0, &df, sizeof(df)) >= 0)
+            l_info("ux0: %u MB libres de %u MB", (unsigned)(df.free >> 20), (unsigned)(df.max >> 20));
+    }
     l_info("%s (iOS -> PS Vita, loader Mach-O + runtime ObjC) iniciando", PORT_NAME);
 
     if (sceIoGetstat("ur0:/data/libshacccg.suprx", &(SceIoStat){0}) < 0 &&
@@ -99,6 +134,7 @@ int main(void) {
     objc_rt_init();
     foundation_init(); // clases nativas: antes de los binds (_OBJC_CLASS_$_...)
     uikit_init();
+    storekit_init();
     ios5_init();
     input_init();
 

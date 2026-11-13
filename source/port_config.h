@@ -10,3 +10,8 @@
 #define PORT_DEVICE_MACHINE "iPhone2,1" // hw.machine (3GS)
 #define GLES_POOL_MB 24
 #define PORT_ACCEL_FROM_STICK 0        // por confirmar si el juego usa acelerómetro
+#define DARWIN_INODE64 1              // dirent/stat de inodo de 64 bits (d_name en +21, st_mode en +4, stat de 108 bytes)
+#define PORT_IAP_UNLOCK "com.konami.pes2012.product.nc.fullversion" // compra no consumible entregada como restaurada (storekit.c)
+#define PORT_AUTOTAP 0                // diagnóstico: toque automático en el centro a los N s (pasa el title; 0 = apagado)
+#define PORT_DUMP_AT 0                // diagnóstico: dump forzado a los N s de proceso (0 = apagado)
+#define PORT_WATCHDOG 20              // s sin girar el run loop -> dump forzado (diagnóstico de cuelgues; 0 = apagado)

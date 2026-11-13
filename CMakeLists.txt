@@ -21,8 +21,10 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 ## vitaGL vendorizada: SOFTFP_ABI=1 es OBLIGATORIO (iOS y nuestro código pasan floats en r0-r3).
+## Sin DRAW_SPEEDHACK: PES 2012 reusa su buffer de skinning entre draws; sin copiar los arrays de cliente la GPU
+## dibujaba jugadores con los vértices del siguiente (picos por toda la pantalla). Si se cambian flags: borrar libvitaGL.a.
 set(VITAGL_VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/vitaGL)
-set(VITAGL_MAKE_FLAGS_STR "SOFTFP_ABI=1 NO_DEBUG=1 HAVE_SHADER_CACHE=1 NO_SPLASHSCREEN=1 HAVE_GLSL_UBOS=1 SAMPLERS_SPEEDHACK=1 DRAW_SPEEDHACK=2")
+set(VITAGL_MAKE_FLAGS_STR "SOFTFP_ABI=1 NO_DEBUG=1 HAVE_SHADER_CACHE=1 NO_SPLASHSCREEN=1 HAVE_GLSL_UBOS=1 SAMPLERS_SPEEDHACK=1")
 separate_arguments(VITAGL_MAKE_FLAGS UNIX_COMMAND "${VITAGL_MAKE_FLAGS_STR}")
 include(ExternalProject)
 ExternalProject_Add(
@@ -58,6 +60,7 @@ add_executable(${CMAKE_PROJECT_NAME}
   source/darwin_printf.c
   source/objc.c
   source/foundation.c
+  source/storekit.c
   source/uikit.c
   source/gles.c
   source/vitagl_no_splash.c

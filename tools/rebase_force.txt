@@ -1,0 +1,2 @@
+# Palabras que SÍ son punteros, confirmadas en consola (dirección del Mach-O). Las lee tools/ios_prep.py.
+0x2e87c8  # #108: última entrada de vtable -> 0x170459 (hoja Thumb); crash en selección de equipos (Exhibición)

@@ -1,0 +1,6 @@
+# Raíces de código confirmadas en consola (dirección del Mach-O; impar = Thumb). Las lee tools/ios_prep.py.
+# Solo para código que la heurística de tablas frena (pares Thumb seguidos que parecen punteros).
+0x155af7  # #103: rama de 0x155a98 (movs r1,r7; movs r0,r6 = 0x00300039 rebaseado -> this = 0x40)
+0xd982c   # #121: ARM hoja (push {r4-r9}) de rasterizado/texturas por software: eoreq rebaseado en 0xd987c -> picos
+0x1146e0  # #121: ídem (0x114730)
+0x114a50  # #121: ídem (0x114aa0)

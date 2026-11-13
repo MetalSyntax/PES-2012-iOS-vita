@@ -332,6 +332,7 @@ static int r_class_addMethod(objc_class *c, SEL s, void *imp, const char *types)
     return 0;
 }
 static void *r_null(void) { return NULL; }
+
 static int r_zero(void) { return 0; }
 static int r_one(void) { return 1; }
 static int r_minus1(void) { return -1; }

@@ -11,6 +11,8 @@
 // GL_FIXED: vitaGL no lo acepta en arrays; se convierte a float al dibujar (también desde VBOs,
 // con una copia en CPU de los datos de cada buffer).
 #include <math.h>
+#include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 #include <stdlib.h>
 #include <string.h>
 #include <vitaGL.h>
@@ -37,6 +39,14 @@ static GLuint scr_fbo, scr_tex, scr_depth;
 
 // ---------------------------------------------------------------- arrays (GL_FIXED -> float)
 
+// diagnóstico #120: traza de llamadas GL de un frame con un modelo grande (jugadores), para ver matrices/punteros
+static int gl_tr, gl_tr_armed, gl_tr_done;
+#define TR(...) do { if (gl_tr) l_info("GL " __VA_ARGS__); } while (0)
+static void tr_mat(const char *what, const float *m) {
+    if (gl_tr)
+        l_info("GL %s [%.3g %.3g %.3g %.3g | %.3g %.3g %.3g %.3g | %.3g %.3g %.3g %.3g | %.3g %.3g %.3g %.3g]", what, m[0], m[1],
+               m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+}
 typedef struct {
     GLint size;
     GLenum type;
@@ -65,6 +75,7 @@ static void *vbo_data(GLuint id) {
     return NULL;
 }
 static void g_glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
+    TR("BufferData(0x%x, %d, %p, 0x%x)", target, (int)size, data, usage);
     GLuint id = target == GL_ARRAY_BUFFER ? bound_array_buffer : bound_element_buffer;
     int free_slot = -1;
     for (int i = 0; i < MAX_VBO; i++) {
@@ -85,6 +96,7 @@ static void g_glBufferData(GLenum target, GLsizeiptr size, const void *data, GLe
     glBufferData(target, size, data, usage);
 }
 static void g_glBufferSubData(GLenum target, GLintptr off, GLsizeiptr size, const void *data) {
+    TR("BufferSubData(0x%x, %d, %d)", target, (int)off, (int)size);
     GLuint id = target == GL_ARRAY_BUFFER ? bound_array_buffer : bound_element_buffer;
     for (int i = 0; i < MAX_VBO; i++)
         if (vbo_copy[i].id == id && off + size <= vbo_copy[i].size)
@@ -92,6 +104,7 @@ static void g_glBufferSubData(GLenum target, GLintptr off, GLsizeiptr size, cons
     glBufferSubData(target, off, size, data);
 }
 static void g_glBindBuffer(GLenum target, GLuint id) {
+    TR("BindBuffer(0x%x, %u)", target, id);
     if (target == GL_ARRAY_BUFFER)
         bound_array_buffer = id;
     else
@@ -112,6 +125,16 @@ static void g_glDeleteBuffers(GLsizei n, const GLuint *ids) {
 static float *conv_buf[A_N];
 static int conv_cap[A_N];
 
+static float read_comp(const uint8_t *p, GLenum t, int i);
+static int type_size(GLenum t);
+// short/byte con stride no múltiplo de 4 (PES 2012: posiciones GL_SHORT x3, stride 6): GXM los leía desalineados
+static int needs_float(const array_ptr *a) {
+    if (a->type == GL_FIXED)
+        return 1;
+    int st = a->stride ? a->stride : a->size * type_size(a->type);
+    (void)st;
+    return 0; // #119: convertir short/byte desalineados a float no cambió los picos
+}
 static const void *fixed_to_float(const array_ptr *a, int n, int slot) {
     int need = n * a->size;
     if (need > conv_cap[slot]) {
@@ -121,13 +144,14 @@ static const void *fixed_to_float(const array_ptr *a, int n, int slot) {
     const uint8_t *base = a->vbo ? (const uint8_t *)vbo_data(a->vbo) + (uintptr_t)a->ptr : a->ptr;
     if (!base)
         return NULL;
-    int stride = a->stride ? a->stride : a->size * 4;
+    int stride = a->stride ? a->stride : a->size * type_size(a->type);
     float *dst = conv_buf[slot];
-    for (int i = 0; i < n; i++) {
-        const int32_t *src = (const int32_t *)(base + i * stride);
+    // color/byte normalizado: ES1 normaliza GL_UNSIGNED_BYTE de color (0..255 -> 0..1)
+    float scale = a->type == GL_FIXED ? 1.0f / 65536.0f : (slot == A_COL && a->type == GL_UNSIGNED_BYTE) ? 1.0f / 255.0f : 1.0f;
+    for (int i = 0; i < n; i++)
         for (int c = 0; c < a->size; c++)
-            dst[i * a->size + c] = src[c] * (1.0f / 65536.0f);
-    }
+            dst[i * a->size + c] = (a->type == GL_FIXED ? (float)((const int32_t *)(base + i * stride))[c]
+                                                         : read_comp(base + i * stride, a->type, c)) * scale;
     return dst;
 }
 
@@ -139,7 +163,7 @@ static void set_pointer(int k, int n) {
     GLenum type = a->type;
     GLsizei stride = a->stride;
     int unbind = 0;
-    if (type == GL_FIXED) {
+    if (needs_float(a)) {
         if (!n)
             return; // se convierte al dibujar
         p = fixed_to_float(a, n, k);
@@ -173,18 +197,22 @@ static void set_pointer(int k, int n) {
 }
 
 static void g_glVertexPointer(GLint size, GLenum type, GLsizei stride, const void *ptr) {
+    TR("VertexPointer(%d, 0x%x, %d, %p) vbo %u", size, type, stride, ptr, bound_array_buffer);
     arr[A_VTX] = (array_ptr){size, type, stride, ptr, bound_array_buffer};
     set_pointer(A_VTX, 0);
 }
 static void g_glNormalPointer(GLenum type, GLsizei stride, const void *ptr) {
+    TR("NormalPointer(0x%x, %d, %p)", type, stride, ptr);
     arr[A_NRM] = (array_ptr){3, type, stride, ptr, bound_array_buffer};
     set_pointer(A_NRM, 0);
 }
 static void g_glColorPointer(GLint size, GLenum type, GLsizei stride, const void *ptr) {
+    TR("ColorPointer(%d, 0x%x, %d, %p)", size, type, stride, ptr);
     arr[A_COL] = (array_ptr){size, type, stride, ptr, bound_array_buffer};
     set_pointer(A_COL, 0);
 }
 static void g_glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const void *ptr) {
+    TR("TexCoordPointer[%d](%d, 0x%x, %d, %p)", client_unit, size, type, stride, ptr);
     arr[A_TC0 + client_unit] = (array_ptr){size, type, stride, ptr, bound_array_buffer};
     set_pointer(A_TC0 + client_unit, 0);
 }
@@ -195,7 +223,7 @@ static void g_glClientActiveTexture(GLenum unit) {
 
 static void convert_fixed(int n) {
     for (int k = 0; k < A_N; k++)
-        if (arr[k].size && arr[k].type == GL_FIXED)
+        if (arr[k].size && needs_float(&arr[k]))
             set_pointer(k, n);
 }
 
@@ -204,7 +232,12 @@ uint32_t gles_get_draw_calls(void) { return draw_calls; }
 
 static int skin(int n);
 static void unskin(void);
+static const uint8_t *arr_base(const array_ptr *a);
+static int type_size(GLenum t);
+static float read_comp(const uint8_t *p, GLenum t, int i);
+
 static void g_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+    TR("DrawArrays(0x%x, %d, %d)", mode, first, count);
     draw_calls++;
     convert_fixed(first + count);
     int skinned = skin(first + count);
@@ -214,11 +247,12 @@ static void g_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 }
 
 static void g_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *idx) {
+    TR("DrawElements(0x%x, %d, 0x%x, %p) ebo %u", mode, count, type, idx, bound_element_buffer);
     draw_calls++;
     extern int palette_active(void);
     int need_fixed = palette_active();
     for (int k = 0; k < A_N; k++)
-        need_fixed |= arr[k].size && arr[k].type == GL_FIXED;
+        need_fixed |= arr[k].size && needs_float(&arr[k]);
     int maxi = 0;
     if (need_fixed) {
         const void *ip = bound_element_buffer ? (const uint8_t *)vbo_data(bound_element_buffer) + (uintptr_t)idx : idx;
@@ -229,6 +263,22 @@ static void g_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void
         }
         convert_fixed(maxi + 1);
     }
+    if (gl_tr && count >= 300 && arr[A_VTX].size) { // muestra de vértices/texcoords del modelo grande
+        const uint8_t *vb = arr_base(&arr[A_VTX]), *tb = arr[A_TC0].size ? arr_base(&arr[A_TC0]) : NULL;
+        const void *ip = bound_element_buffer ? (const uint8_t *)vbo_data(bound_element_buffer) + (uintptr_t)idx : idx;
+        int lo = 1 << 30, hi = -1;
+        for (int i = 0; ip && i < count; i++) {
+            int v = type == GL_UNSIGNED_BYTE ? ((const uint8_t *)ip)[i] : ((const uint16_t *)ip)[i];
+            lo = v < lo ? v : lo, hi = v > hi ? v : hi;
+        }
+        l_info("GL   índices %d..%d; tc vbo %u base %p", lo, hi, arr[A_TC0].vbo, tb);
+        int vs = arr[A_VTX].stride ? arr[A_VTX].stride : arr[A_VTX].size * type_size(arr[A_VTX].type);
+        for (int k = 0; vb && k <= hi && k < 400; k += 40)
+            l_info("GL   v[%d] = %g %g %g", k, read_comp(vb + k * vs, arr[A_VTX].type, 0), read_comp(vb + k * vs, arr[A_VTX].type, 1),
+                   read_comp(vb + k * vs, arr[A_VTX].type, 2));
+    }
+    if (0 && count >= 600 && !gl_tr && gl_tr_done < 3 && sceKernelGetProcessTimeWide() > 25000000ULL)
+        gl_tr_armed = 1; // traza el frame siguiente (#120)
     int skinned = skin(maxi + 1);
     glDrawElements(mode, count, type, idx);
     if (skinned)
@@ -319,7 +369,7 @@ static void g_glGetPointerv(GLenum pname, void **out) {
 // MATRIX_PALETTE + glCurrentPaletteMatrixOES + glLoad*/Mult*/Translate/...); al dibujar con la paleta
 // activa, cada vértice (y normal) se transforma como sum(w_k * P[i_k] * v) y se dibuja con modelview
 // identidad (en OES_matrix_palette la paleta reemplaza a la modelview; la proyección se aplica igual).
-#define MAX_PALETTE 32
+#define MAX_PALETTE 32 // > 11 anunciadas
 static float palette[MAX_PALETTE][16];
 static int cur_palette, palette_mode, palette_on, mi_on, wt_on;
 static GLenum real_matrix_mode = GL_MODELVIEW;
@@ -339,6 +389,7 @@ static void fx_to_f(const GLfixed *x, float *f) {
 }
 
 static void g_glMatrixMode(GLenum m) {
+    TR("MatrixMode(0x%x)", m);
     palette_mode = m == GL_MATRIX_PALETTE_OES;
     if (!palette_mode) {
         real_matrix_mode = m;
@@ -346,27 +397,32 @@ static void g_glMatrixMode(GLenum m) {
     }
 }
 static void g_glLoadIdentity(void) {
+    TR("LoadIdentity");
     if (!palette_mode)
         return glLoadIdentity();
     static const float id[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     memcpy(palette[cur_palette], id, sizeof(id));
 }
 static void g_glLoadMatrixf(const GLfloat *m) {
+    tr_mat("LoadMatrixf", m);
     if (!palette_mode)
         return glLoadMatrixf(m);
     memcpy(palette[cur_palette], m, 16 * sizeof(float));
 }
 static void g_glLoadMatrixx(const GLfixed *m) {
+    if (gl_tr) { float f_[16]; for (int i = 0; i < 16; i++) f_[i] = m[i] / 65536.0f; tr_mat("LoadMatrixx", f_); }
     if (!palette_mode)
         return glLoadMatrixx(m);
     fx_to_f(m, palette[cur_palette]);
 }
 static void g_glMultMatrixf(const GLfloat *m) {
+    tr_mat("MultMatrixf", m);
     if (!palette_mode)
         return glMultMatrixf(m);
     pal_mult(m);
 }
 static void g_glMultMatrixx(const GLfixed *m) {
+    if (gl_tr) { float f_[16]; for (int i = 0; i < 16; i++) f_[i] = m[i] / 65536.0f; tr_mat("MultMatrixx", f_); }
     if (!palette_mode)
         return glMultMatrixx(m);
     float f[16];
@@ -374,6 +430,7 @@ static void g_glMultMatrixx(const GLfixed *m) {
     pal_mult(f);
 }
 static void g_glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
+    TR("Translatef(%g, %g, %g)", x, y, z);
     if (!palette_mode)
         return glTranslatef(x, y, z);
     const float t[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1};
@@ -381,6 +438,7 @@ static void g_glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
 }
 static void g_glTranslatex(GLfixed x, GLfixed y, GLfixed z) { g_glTranslatef(x / 65536.0f, y / 65536.0f, z / 65536.0f); }
 static void g_glScalef(GLfloat x, GLfloat y, GLfloat z) {
+    TR("Scalef(%g, %g, %g)", x, y, z);
     if (!palette_mode)
         return glScalef(x, y, z);
     const float t[16] = {x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1};
@@ -388,6 +446,7 @@ static void g_glScalef(GLfloat x, GLfloat y, GLfloat z) {
 }
 static void g_glScalex(GLfixed x, GLfixed y, GLfixed z) { g_glScalef(x / 65536.0f, y / 65536.0f, z / 65536.0f); }
 static void g_glRotatef(GLfloat a, GLfloat x, GLfloat y, GLfloat z) {
+    TR("Rotatef(%g, %g, %g, %g)", a, x, y, z);
     if (!palette_mode)
         return glRotatef(a, x, y, z);
     float l = sqrtf(x * x + y * y + z * z);
@@ -403,10 +462,12 @@ static void g_glRotatex(GLfixed a, GLfixed x, GLfixed y, GLfixed z) {
     g_glRotatef(a / 65536.0f, x / 65536.0f, y / 65536.0f, z / 65536.0f);
 }
 static void g_glPushMatrix(void) {
+    TR("PushMatrix");
     if (!palette_mode)
         glPushMatrix();
 }
 static void g_glPopMatrix(void) {
+    TR("PopMatrix");
     if (!palette_mode)
         glPopMatrix();
 }
@@ -508,6 +569,7 @@ static void unskin(void) {
 
 int palette_active(void) { return palette_on && mi_on && wt_on; }
 static void g_glEnable(GLenum cap) {
+    TR("Enable(0x%x)", cap);
     if (cap == GL_MATRIX_PALETTE_OES) {
         palette_on = 1;
         return;
@@ -515,6 +577,7 @@ static void g_glEnable(GLenum cap) {
     glEnable(cap);
 }
 static void g_glDisable(GLenum cap) {
+    TR("Disable(0x%x)", cap);
     if (cap == GL_MATRIX_PALETTE_OES) {
         palette_on = 0;
         return;
@@ -522,6 +585,7 @@ static void g_glDisable(GLenum cap) {
     glDisable(cap);
 }
 static void g_glEnableClientState(GLenum a) {
+    TR("EnableClientState(0x%x)", a);
     if (a == 0x8844 /* MATRIX_INDEX_ARRAY */ || a == 0x86AD /* WEIGHT_ARRAY */) {
         *(a == 0x8844 ? &mi_on : &wt_on) = 1;
         return;
@@ -529,6 +593,7 @@ static void g_glEnableClientState(GLenum a) {
     glEnableClientState(a);
 }
 static void g_glDisableClientState(GLenum a) {
+    TR("DisableClientState(0x%x)", a);
     if (a == 0x8844 || a == 0x86AD) {
         *(a == 0x8844 ? &mi_on : &wt_on) = 0;
         return;
@@ -556,8 +621,21 @@ static const GLubyte *g_glGetString(GLenum name) {
 }
 
 static void g_glGetIntegerv(GLenum pname, GLint *v) {
+    if ((uintptr_t)v < 0x10000) {
+        // diagnóstico (PES 2012: this = 0x38 → v = 0x38): pname + direcciones del juego en la pila, sin escribir
+        uint32_t *sp = (uint32_t *)__builtin_frame_address(0);
+        l_error("glGetIntegerv(0x%x, %p): puntero inválido", pname, v);
+        for (int i = 0, k = 0; i < 512 && k < 12; i++)
+            if (sp[i] >= 0x98001000u && sp[i] < 0x9831e000u)
+                l_error("  pila[%d] = 0x%x", i, (unsigned)(sp[i] - 0x98000000u)), k++;
+        return;
+    }
     if (pname == GL_MAX_TEXTURE_SIZE) {
         *v = 2048;
+        return;
+    }
+    if (pname == 0x8842 || pname == 0x86A4) { // GL_MAX_PALETTE_MATRICES_OES / GL_MAX_VERTEX_UNITS_OES (SGX 535)
+        *v = pname == 0x8842 ? 11 : 4;
         return;
     }
     glGetIntegerv(pname, v);
@@ -708,6 +786,16 @@ void gles_dest_rect(int *x, int *y, int *w, int *h) {
 }
 
 void gles_present(void) {
+    if (gl_tr) {
+        gl_tr = 0, gl_tr_done++;
+        l_info("GL ---- fin de frame trazado");
+    } else if (gl_tr_armed) {
+        static uint64_t last;
+        uint64_t now = sceKernelGetProcessTimeWide();
+        if (now - last > 8000000ULL)
+            gl_tr = 1, last = now, l_info("GL ---- frame trazado %d", gl_tr_done);
+        gl_tr_armed = 0;
+    }
     static const GLenum caps[] = {GL_BLEND, GL_ALPHA_TEST, GL_SCISSOR_TEST, GL_DEPTH_TEST, GL_CULL_FACE, GL_FOG,
                                   GL_LIGHTING, GL_TEXTURE_2D};
     enum { NCAPS = sizeof(caps) / sizeof(caps[0]) };

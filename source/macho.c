@@ -77,16 +77,21 @@ void ml_unimpl_log(int idx) {
     }
 }
 
+// Copia n palabras de código ARM al arena RX (justo debajo de la imagen: al alcance de un B).
+uintptr_t macho_code(const uint32_t *code, uint32_t n) {
+    if (thunk_head + n > thunk_end)
+        fatal_error("arena de thunks llena");
+    uintptr_t addr = (uintptr_t)thunk_head;
+    kuKernelCpuUnrestrictedMemcpy(thunk_head, code, n * 4);
+    kuKernelFlushCaches(thunk_head, n * 4);
+    thunk_head += n;
+    return addr;
+}
+
 // ldr ip, =ip_value; ldr pc, =jump
 uintptr_t macho_thunk(uint32_t ip_value, void *jump) {
-    if (thunk_head + 4 > thunk_end)
-        fatal_error("arena de thunks llena");
     uint32_t code[4] = {0xE59FC000, 0xE59FF000, ip_value, (uint32_t)jump};
-    uintptr_t addr = (uintptr_t)thunk_head;
-    kuKernelCpuUnrestrictedMemcpy(thunk_head, code, sizeof(code));
-    kuKernelFlushCaches(thunk_head, sizeof(code));
-    thunk_head += 4;
-    return addr;
+    return macho_code(code, 4);
 }
 
 static uintptr_t make_unimpl_thunk(const char *name) {

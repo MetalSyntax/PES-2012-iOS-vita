@@ -6,11 +6,15 @@
 //   run loop (ui_runloop_tick: input, acelerómetro, timers, notificaciones diferidas, IME).
 // El juego dibuja desde un NSTimer/CADisplayLink/hilo propio y presenta con
 // -[EAGLContext presentRenderbuffer:] -> gles_present().
+#include <malloc.h>
 #include <math.h>
 #include <png.h>
 #include <psp2/ctrl.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/ime_dialog.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/power.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/touch.h>
 #include <stdio.h>
@@ -200,6 +204,14 @@ static void v_convertRect(CGRect *ret, id self, SEL _c, CGRect r, id view) { *re
 static float v_scale(id self, SEL _c) { return 1.0f; }
 static void v_sizeThatFits(CGSize *ret, id self, SEL _c, CGSize s) { *ret = VX(self)->frame.s; }
 
+// UIResponder: una vista que no implementa touches* los pasa a su superview (PES 2012: GLView -> TopView)
+static void v_touch_fwd(id self, SEL _c, id set, id ev) {
+    if (*_c == 't' && _c[7] == 'B') // solo touchesBegan: diagnóstico #094
+        l_info("%s %s -> superview %s", class_getName(object_getClass(self)), _c,
+               VX(self)->superview ? class_getName(object_getClass(VX(self)->superview)) : "(nil)");
+    if (VX(self)->superview)
+        MSG2(VX(self)->superview, _c, set, ev);
+}
 static const nmethod uiview_c[] = {NM("layerClass", v_layerClass), {0}};
 static const nmethod uiview_i[] = {
     NM("init", v_init), NM("initWithFrame:", v_initWithFrame), NM("initWithCoder:", v_initWithCoder),
@@ -208,6 +220,8 @@ static const nmethod uiview_i[] = {
     NM("setTransform:", v_setTransform), NM("layer", v_layer), NM("window", v_window), NM("addSubview:", v_addSubview),
     NM("insertSubview:atIndex:", v_addSubview), NM("insertSubview:aboveSubview:", v_addSubview),
     NM("insertSubview:belowSubview:", v_addSubview), NM("removeFromSuperview", v_removeFromSuperview),
+    NM("touchesBegan:withEvent:", v_touch_fwd), NM("touchesMoved:withEvent:", v_touch_fwd),
+    NM("touchesEnded:withEvent:", v_touch_fwd), NM("touchesCancelled:withEvent:", v_touch_fwd),
     NM("superview", v_superview), NM("subviews", v_subviews), NM("setHidden:", v_setHidden), NM("isHidden", v_isHidden),
     NM("hidden", v_isHidden), NM("setAlpha:", v_setAlpha), NM("alpha", v_alpha), NM("setTag:", v_setTag),
     NM("tag", v_tag), NM("viewWithTag:", v_viewWithTag), NM("setUserInteractionEnabled:", v_setUserInteraction),
@@ -491,6 +505,15 @@ static id hit_view(id v, float x, float y) {
     CGRect f = VX(v)->frame;
     if (x < f.o.x || y < f.o.y || x >= f.o.x + f.s.w || y >= f.o.y + f.s.h)
         return NULL;
+    // pointInside:withEvent: propio del juego (PES 2012: GLView devuelve NO y el toque va a MainView, debajo)
+    static SEL pin;
+    if (!pin)
+        pin = sel_registerName("pointInside:withEvent:");
+    if (objc_responds(v, pin)) {
+        union { float f; uint32_t u; } px = {x - f.o.x}, py = {y - f.o.y};
+        if (!(objc_msg(v, pin, px.u, py.u, (uint32_t)touch_event, 0) & 0xFF))
+            return NULL;
+    }
     id subs = VX(v)->subviews;
     for (int i = ns_array_count(subs) - 1; i >= 0; i--) {
         id r = hit_view(ns_array_get(subs, i), x - f.o.x, y - f.o.y);
@@ -508,6 +531,7 @@ void ui_touch_event(int finger, int phase, float x, float y) {
     ui_touch *t = live[finger];
     if (phase == 0) {
         id view = hit_view(key_window, x, y);
+        l_info("toque %d en (%.0f, %.0f) -> %s", finger, x, y, view ? class_getName(object_getClass(view)) : "(ninguna vista)");
         if (!view)
             return;
         if (t)
@@ -909,11 +933,20 @@ static int al_addButton(alert *self, SEL _c, id t) { return self->nbuttons++; }
 static int al_count(alert *self, SEL _c) { return self->nbuttons; }
 static int al_cancelIndex(alert *self, SEL _c) { return 0; }
 static void al_setDelegate(alert *self, SEL _c, id d) { self->delegate = d; }
+// Marmalade (s3eDisplayError) arma el alert con initWithFrame: + setTitle:/setMessage:
+static void al_setTitle(alert *self, SEL _c, id t) {
+    objc_release(self->title);
+    self->title = objc_retain(t);
+}
+static void al_setMessage(alert *self, SEL _c, id m) {
+    objc_release(self->message);
+    self->message = objc_retain(m);
+}
 static const nmethod uialert_i[] = {
     NM("initWithTitle:message:delegate:cancelButtonTitle:otherButtonTitles:", al_init), NM("show", al_show),
     NM("addButtonWithTitle:", al_addButton), NM("numberOfButtons", al_count), NM("cancelButtonIndex", al_cancelIndex),
     NM("setDelegate:", al_setDelegate), NM("dismissWithClickedButtonIndex:animated:", v_noop),
-    NM("setTitle:", v_noop), NM("setMessage:", v_noop), NM("setCancelButtonIndex:", v_noop), {0}};
+    NM("setTitle:", al_setTitle), NM("setMessage:", al_setMessage), NM("setCancelButtonIndex:", v_noop), {0}};
 
 static void glk_controller_loaded(id vc);
 static void set_outlet(id src, const char *label, id dst);
@@ -1435,14 +1468,68 @@ void ui_runloop_tick(double max_wait) {
     tick_depth--;
 }
 
+#if PORT_WATCHDOG
+// Si el bucle principal deja de girar PORT_WATCHDOG segundos, crash deliberado en este hilo: el .psp2dmp trae los
+// registros de todos los hilos (tools/dump_threads.py) y muestra dónde está bloqueado el principal.
+static volatile uint64_t loop_tick;
+static int watchdog_thread(SceSize args, void *argp) {
+    for (;;) {
+        sceKernelDelayThread(2 * 1000000);
+        uint64_t t = loop_tick;
+        if (t) { // diagnóstico #084: el log se corta a los ~15 s sin dump; archivo propio, sin el mutex del log
+            static SceUID fd = -1;
+            if (fd < 0)
+                fd = sceIoOpen(DATA_PATH "logs/wd.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+            // sin malloc/snprintf/locks (diagnóstico #106): segundos de proceso y ms desde el último tick
+            char b[24];
+            unsigned v[2] = {(unsigned)(sceKernelGetProcessTimeWide() / 1000), (unsigned)((sceKernelGetProcessTimeWide() - t) / 1000)};
+            int n = 0;
+            for (int k = 0; k < 2; k++) {
+                char tmp[12];
+                int m = 0;
+                do
+                    tmp[m++] = '0' + v[k] % 10;
+                while (v[k] /= 10);
+                while (m)
+                    b[n++] = tmp[--m];
+                b[n++] = k ? '\n' : ' ';
+            }
+            sceIoWrite(fd, b, n);
+        }
+#if PORT_DUMP_AT
+        if (sceKernelGetProcessTimeWide() > PORT_DUMP_AT * 1000000ULL)
+            *(volatile int *)0 = 0; // dump con todos los hilos (¿dónde quedó el hilo de carga?)
+#endif
+        if (t && sceKernelGetProcessTimeWide() - t > PORT_WATCHDOG * 1000000ULL)
+            *(volatile int *)0 = 0; // sin log: si el bloqueo es del propio log, l_error no volvería
+    }
+    return 0;
+}
+#endif
+
+void storekit_tick(void);
 void ui_runloop_forever(void) {
     static uint64_t last_log;
     l_info("run loop principal");
+#if PORT_WATCHDOG
+    SceUID wd = sceKernelCreateThread("watchdog", watchdog_thread, 64, 0x4000, 0, 0, NULL);
+    if (wd >= 0)
+        sceKernelStartThread(wd, 0, NULL);
+#endif
     for (;;) {
         objc_pool_push();
         ui_runloop_tick(0.02);
+        storekit_tick(); // respuestas de la tienda emulada (storekit.c)
+        static uint64_t last_tick_power;
+        if (sceKernelGetProcessTimeWide() - last_tick_power > 1000000) { // sin auto-suspensión por inactividad
+            sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+            last_tick_power = sceKernelGetProcessTimeWide();
+        }
         objc_pool_pop();
         uint64_t now = sceKernelGetProcessTimeWide();
+#if PORT_WATCHDOG
+        loop_tick = now;
+#endif
         if (now - last_log > 10 * 1000000ULL) {
             l_info("vivo: %u frames presentados, %u draw calls", (unsigned)frames, (unsigned)gles_get_draw_calls());
             last_log = now;

@@ -20,6 +20,7 @@ uint32_t macho_read_text(uint32_t vm);
 void macho_hook_addr(uint32_t vm, void *dst); // vm sin slide (bit 0 = Thumb)
 int macho_hook(const char *name, void *dst);
 uintptr_t macho_thunk(uint32_t ip_value, void *jump);
+uintptr_t macho_code(const uint32_t *code, uint32_t n); // al arena RX, devuelve la dirección
 uintptr_t macho_resolve(const char *name, int is_lazy);
 
 // Llamadas al código del juego preservando r9 (temporal en Darwin).

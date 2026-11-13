@@ -44,6 +44,8 @@ static struct {
     float x, y; // lógicas (lo que se ve)
 } binds[MAX_BIND];
 static int nbinds;
+static float lstick[3]; // LSTICK x y radio: el stick arrastra un dedo virtual sobre el joystick de la pantalla
+#define STICK_FINGER 6
 
 static void load_controls(void) {
     FILE *f = fopen(DATA_PATH "controls.txt", "r");
@@ -54,7 +56,9 @@ static void load_controls(void) {
     char line[96], n[32];
     float x, y;
     while (fgets(line, sizeof(line), f) && nbinds < MAX_BIND)
-        if (line[0] != '#' && sscanf(line, "%31s %f %f", n, &x, &y) == 3)
+        if (line[0] != '#' && sscanf(line, "LSTICK %f %f %f", &lstick[0], &lstick[1], &lstick[2]) == 3)
+            l_info("controls.txt: stick izquierdo -> joystick en (%g, %g) r %g", lstick[0], lstick[1], lstick[2]);
+        else if (line[0] != '#' && sscanf(line, "%31s %f %f", n, &x, &y) == 3)
             for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
                 if (!strcmp(n, names[i].name))
                     binds[nbinds++] = (typeof(binds[0])){names[i].mask, x, y};
@@ -146,6 +150,16 @@ void input_poll(void) {
         }
     }
 
+#if PORT_AUTOTAP
+    { // ciclo automático sin manos: un toque en el centro para pasar el title
+        static int step;
+        if (step < 2 && sceKernelGetProcessTimeWide() > PORT_AUTOTAP * 1000000ULL + step * 100000ULL) {
+            l_info("autotap %s", step ? "fin" : "inicio");
+            ui_touch_event(7, step ? 3 : 0, fb_w / 2.0f, fb_h / 2.0f);
+            step++;
+        }
+    }
+#endif
     SceCtrlData pad;
     sceCtrlPeekBufferPositive(0, &pad, 1);
     stick_x = (pad.lx - 128) / 127.0f;
@@ -154,6 +168,26 @@ void input_poll(void) {
         stick_x = 0;
     if (stick_y > -0.12f && stick_y < 0.12f)
         stick_y = 0;
+    if (lstick[2] > 0) { // dedo virtual: toca el centro y se mueve con la inclinación; suelta al volver al centro
+        static int down;
+        float lw, lh, vx, vy;
+        logical_size(&lw, &lh);
+        // zona muerta propia: con la deriva del stick el dedo quedaba apretado y el juego (un solo toque) ignoraba el resto
+        int active = stick_x * stick_x + stick_y * stick_y > 0.35f * 0.35f;
+        to_view((lstick[0] + stick_x * lstick[2]) / lw, (lstick[1] + stick_y * lstick[2]) / lh, &vx, &vy);
+        if (active && !down) {
+            float cx, cy;
+            to_view(lstick[0] / lw, lstick[1] / lh, &cx, &cy);
+            ui_touch_event(STICK_FINGER, 0, cx, cy);
+            down = 1;
+        }
+        if (active)
+            ui_touch_event(STICK_FINGER, 1, vx, vy);
+        else if (down) {
+            ui_touch_event(STICK_FINGER, 3, -1, -1);
+            down = 0;
+        }
+    }
     uint32_t b = pad.buttons, changed = b ^ prev_buttons;
     for (int i = 0; i < nbinds; i++) {
         if (!(changed & binds[i].mask))

@@ -34,9 +34,19 @@ extern void *__dynamic_cast(const void *, const void *, const void *, long); // 
 
 // Rutas absolutas de iOS ("/var/mobile/...", "/private/...") -> dentro de DATA_PATH; si el
 // archivo está en el bundle, se usa ese. Las de la Vita (ux0:, app0:) pasan tal cual.
+// En iOS el bundle es "<HOME>/X.app"; aquí es DATA_PATH "game_app". readdir de DATA_PATH lo muestra como
+// "game_app.app" (Marmalade fija rom:// a la primera entrada de HOME que termina en ".app") y aquí se deshace.
+#define BUNDLE_DIR "game_app"
 const char *darwin_path(const char *in, char *out, size_t outlen) {
     if (!in)
         return NULL;
+    char unalias[512];
+    const char *dotapp = strstr(in, BUNDLE_DIR ".app");
+    if (dotapp) {
+        snprintf(unalias, sizeof(unalias), "%.*s" BUNDLE_DIR "%s", (int)(dotapp - in), in,
+                 dotapp + sizeof(BUNDLE_DIR ".app") - 1);
+        in = unalias;
+    }
     if (strchr(in, ':')) {
         snprintf(out, outlen, "%s", in);
         return out;
@@ -72,7 +82,7 @@ const char *darwin_path(const char *in, char *out, size_t outlen) {
 static FILE *d_fopen(const char *path, const char *mode) {
     PATH(path);
     FILE *f = fopen(P, mode);
-    l_debug("fopen(%s, %s) -> %p", P, mode, f);
+    l_info("fopen(%s, %s) -> %p", P, mode, f);
     return f;
 }
 static FILE *d_freopen(const char *path, const char *mode, FILE *f) {
@@ -127,9 +137,28 @@ static int d_open(const char *path, int flags, int mode) {
         f |= O_TRUNC;
     if (flags & 0x8)
         f |= O_APPEND;
-    return open(P, f, mode);
+    int fd = open(P, f, mode);
+    l_info("open(%s, 0x%x) -> %d", P, flags, fd);
+    return fd;
 }
 
+#if DARWIN_INODE64
+// struct stat de Darwin con __DARWIN_64_BIT_INO_T: 108 bytes, st_mode en +4, int64 alineados a 4.
+typedef struct __attribute__((packed)) {
+    int32_t st_dev;
+    uint16_t st_mode, st_nlink;
+    uint64_t st_ino;
+    uint32_t st_uid, st_gid;
+    int32_t st_rdev;
+    int32_t st_atime_, st_atime_ns, st_mtime_, st_mtime_ns, st_ctime_, st_ctime_ns, st_birth, st_birth_ns;
+    int64_t st_size, st_blocks;
+    int32_t st_blksize;
+    uint32_t st_flags, st_gen;
+    int32_t st_lspare;
+    int64_t st_qspare[2];
+} darwin_stat;
+_Static_assert(sizeof(darwin_stat) == 108, "darwin_stat64");
+#else
 // struct stat de Darwin (32 bits, ino32): 96 bytes, int64 alineados a 4.
 typedef struct __attribute__((packed)) {
     int32_t st_dev;
@@ -144,6 +173,7 @@ typedef struct __attribute__((packed)) {
     int32_t st_lspare;
     int64_t st_qspare[2];
 } darwin_stat;
+#endif
 static void to_darwin_stat(const struct stat *s, darwin_stat *d) {
     memset(d, 0, sizeof(*d));
     // S_IFDIR/S_IFREG coinciden (0040000/0100000)
@@ -160,6 +190,7 @@ static int d_stat(const char *path, darwin_stat *out) {
     PATH(path);
     struct stat st;
     int r = stat(P, &st);
+    // l_info("stat(%s) -> %d", P, r); // diagnóstico de rutas (quitado en #093: cientos por segundo)
     if (!r && out)
         to_darwin_stat(&st, out);
     return r;
@@ -173,12 +204,32 @@ static int d_fstat(int fd, darwin_stat *out) {
 }
 
 // dirent de Darwin (ino32): {u32 ino; u16 reclen; u8 type; u8 namlen; char name[256]}
+#if DARWIN_INODE64
+typedef struct __attribute__((packed)) { // __DARWIN_64_BIT_INO_T: d_name en +21
+    uint64_t d_ino, d_seekoff;
+    uint16_t d_reclen, d_namlen;
+    uint8_t d_type;
+    char d_name[1024];
+} darwin_dirent;
+#else
 typedef struct {
     uint32_t d_ino;
     uint16_t d_reclen;
     uint8_t d_type, d_namlen;
     char d_name[256];
 } darwin_dirent;
+#endif
+// off_t de Darwin es de 64 bits y en la ABI de iOS armv6 no se alinea a par de registros:
+// lseek(fd, off64 en r1:r2, whence en r3) -> off64 en r0:r1. newlib es de 32 bits.
+static int64_t d_lseek(int fd, uint32_t lo, uint32_t hi, int whence) {
+    int64_t off = (int64_t)(((uint64_t)hi << 32) | lo);
+    return lseek(fd, (off_t)off, whence);
+}
+static int d_truncate(const char *path, uint32_t lo, uint32_t hi) {
+    PATH(path);
+    return truncate(P, (off_t)(((uint64_t)hi << 32) | lo));
+}
+
 typedef struct {
     DIR *dir;
     darwin_dirent ent;
@@ -199,6 +250,12 @@ static darwin_dirent *d_readdir(d_dir *d) {
     if (!e)
         return NULL;
     snprintf(d->ent.d_name, sizeof(d->ent.d_name), "%s", e->d_name);
+    char norm[512];
+    snprintf(norm, sizeof(norm), "%s/", d->path);
+    for (char *q; (q = strstr(norm, "//"));) // "ux0:data/x//" == DATA_PATH
+        memmove(q, q + 1, strlen(q));
+    if (!strcmp(e->d_name, BUNDLE_DIR) && !strcmp(norm, DATA_PATH))
+        snprintf(d->ent.d_name, sizeof(d->ent.d_name), BUNDLE_DIR ".app");
     d->ent.d_namlen = strlen(d->ent.d_name);
     d->ent.d_reclen = sizeof(darwin_dirent);
     d->ent.d_ino = 1;
@@ -220,6 +277,12 @@ static int d_closedir(d_dir *d) {
 
 static FILE *d_stderrp, *d_stdinp, *d_stdoutp;
 static int *d___error(void) { return &errno; }
+static int d_read(int fd, void *buf, size_t n) {
+    int r = read(fd, buf, n);
+    if (r < 0)  // diagnóstico #066: SQLITE_IOERR por read() fallido
+        l_error("read(fd=%d, %p, %u) = %d errno=%d", fd, buf, n, r, errno);
+    return r;
+}
 static void *d___memcpy_chk(void *d, const void *s, size_t n, size_t dn) { return memcpy(d, s, n); }
 static void *d___memmove_chk(void *d, const void *s, size_t n, size_t dn) { return memmove(d, s, n); }
 static void *d___memset_chk(void *d, int c, size_t n, size_t dn) { return memset(d, c, n); }
@@ -907,8 +970,8 @@ const import_entry darwin_imports[] = {
     F(perror, d_puts), F(mkdir, d_mkdir), F(remove, d_remove), F(unlink, d_unlink), F(rmdir, d_rmdir),
     F(rename, d_rename), F(chdir, d_chdir), D(getcwd), F(access, d_access), F(realpath, d_realpath),
     F(realpath$DARWIN_EXTSN, d_realpath), F(stat, d_stat), F(lstat, d_stat), F(fstat, d_fstat),
-    F(opendir, d_opendir), F(readdir, d_readdir), F(closedir, d_closedir), F(open, d_open), D(close), D(read),
-    D(write), D(lseek), V(__stderrp, &d_stderrp), V(__stdoutp, &d_stdoutp), V(__stdinp, &d_stdinp),
+    F(opendir, d_opendir), F(readdir, d_readdir), F(closedir, d_closedir), F(open, d_open), D(close), F(read, d_read),
+    D(write), F(lseek, d_lseek), F(truncate, d_truncate), V(__stderrp, &d_stderrp), V(__stdoutp, &d_stdoutp), V(__stdinp, &d_stdinp),
     F(getenv, d_getenv),
     // tiempo / sistema
     D(gettimeofday), D(time), D(mktime), D(difftime), D(strftime), F(localtime, d_localtime),
