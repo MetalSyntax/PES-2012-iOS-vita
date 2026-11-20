@@ -309,6 +309,9 @@ Se arranca desde `PES2012_v1.0.2_os30.ipa`: Mach-O armv6 desencriptado (`cryptid
   SLERP de huesos ×7 → picos. Fix: `tools/rebase_skip.txt` (lo lee `ios_prep.py`); rebase.bin 52779 → 52774.
   Además: menú SELECT+START de opciones de video copiado de Ferrari GT (`options.c`, `font8x8.c`; `options.txt`
   reemplaza a `rotation.txt`).
+- **#126** (usuario, v0.1.0): **picos corregidos en el partido** (menú de selección sin probar). Ingame 30 FPS
+  sostenidos; el menú tiene caídas de FPS. Los controles virtuales del juego se ven en pantalla (el control físico
+  está mapeado sobre ellos): para la próxima build, ocultos por defecto con opción para mostrarlos.
 - Aviso aparte (sin efecto por ahora): `Info.plist` del IPA es XML y el loader solo lee plist binario.
 
 ## PENDIENTE EN CONSOLA (corrida iOS #1)

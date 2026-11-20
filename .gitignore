@@ -58,3 +58,8 @@ report.txt
 
 # Skills locales del agente
 .claude/
+
+# Capturas e imágenes sueltas
+screenshots/
+*.webp
+*.bak
