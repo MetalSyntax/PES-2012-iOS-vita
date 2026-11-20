@@ -67,6 +67,8 @@ add_executable(${CMAKE_PROJECT_NAME}
   source/openal.c
   source/audio.c
   source/input.c
+  source/options.c
+  source/font8x8.c
   source/cgbi.c
   source/cxx_imports.c
   source/ios5.c

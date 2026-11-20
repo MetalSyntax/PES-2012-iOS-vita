@@ -32,6 +32,7 @@
 #include "log.h"
 #include "macho.h"
 #include "objc.h"
+#include "options.h"
 
 typedef struct {
     float x, y;
@@ -1500,6 +1501,8 @@ static int watchdog_thread(SceSize args, void *argp) {
         if (sceKernelGetProcessTimeWide() > PORT_DUMP_AT * 1000000ULL)
             *(volatile int *)0 = 0; // dump con todos los hilos (¿dónde quedó el hilo de carga?)
 #endif
+        if (options_active()) // menú de opciones: el present queda en pausa a propósito
+            loop_tick = t = sceKernelGetProcessTimeWide();
         if (t && sceKernelGetProcessTimeWide() - t > PORT_WATCHDOG * 1000000ULL)
             *(volatile int *)0 = 0; // sin log: si el bloqueo es del propio log, l_error no volvería
     }

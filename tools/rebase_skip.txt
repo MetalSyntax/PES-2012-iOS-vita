@@ -1,0 +1,9 @@
+# Palabras que tools/ios_prep.py NO rebasea (dirección del Mach-O): datos que la heurística toma por punteros.
+# Tabla de senos de IwGeom (u16, 1.0 = 4096) en 0x100c37c: sin[n..] empaquetados parecen punteros. Rebaseados,
+# sin(1-2°) ~ 9.5 -> SLERP divide por sin(omega) -> cuaterniones x7 -> matrices de hueso x50 -> picos en los
+# jugadores. Mismo bug y fix que PES 2011 (corrida #6 de su port_progress.md).
+0x100c37c   # = 0x00060000 (0, 6)
+0x100c380   # = 0x0012000c (12, 18)
+0x100c384   # = 0x001f0019 (25, 31)
+0x100c388   # = 0x002b0025 (37, 43)
+0x100c3cc

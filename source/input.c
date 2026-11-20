@@ -17,17 +17,16 @@
 #include "hle.h"
 #include "input.h"
 #include "log.h"
+#include "options.h"
 
 #define FINGERS 6
 #define BTN_FINGER0 2 // los botones usan dedos virtuales 2..7 (los reales, 0..1)
-extern int port_rotation;
 
 static struct {
     int id, down;
 } fingers[2];
 static uint32_t prev_buttons;
 static float stick_x, stick_y;
-static uint64_t combo_since;
 
 static const struct {
     const char *name;
@@ -69,13 +68,6 @@ static void load_controls(void) {
 void input_init(void) {
     sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
-    FILE *f = fopen(DATA_PATH "rotation.txt", "r");
-    if (f) {
-        int r;
-        if (fscanf(f, "%d", &r) == 1 && r >= 0 && r <= 2)
-            port_rotation = r;
-        fclose(f);
-    }
     load_controls();
 }
 
@@ -197,23 +189,9 @@ void input_poll(void) {
         to_view(binds[i].x / lw, binds[i].y / lh, &vx, &vy);
         ui_touch_event(BTN_FINGER0 + i, (b & binds[i].mask) ? 0 : 3, vx, vy);
     }
-    // SELECT+START sostenidos 2 s: rotación siguiente (se guarda).
-    uint64_t now = sceKernelGetProcessTimeWide();
-    if ((b & (SCE_CTRL_SELECT | SCE_CTRL_START)) == (SCE_CTRL_SELECT | SCE_CTRL_START)) {
-        if (!combo_since)
-            combo_since = now;
-        else if (now - combo_since > 2000000) {
-            port_rotation = (port_rotation + 1) % 3;
-            combo_since = now + 60000000; // una vez por pulsación
-            FILE *f = fopen(DATA_PATH "rotation.txt", "w");
-            if (f) {
-                fprintf(f, "%d\n", port_rotation);
-                fclose(f);
-            }
-            l_info("rotación -> %d", port_rotation);
-        }
-    } else {
-        combo_since = 0;
-    }
+    // SELECT+START: menú de opciones de video (options.c; ahí también va la rotación)
+    uint32_t both = SCE_CTRL_SELECT | SCE_CTRL_START;
+    if ((b & both) == both && (prev_buttons & both) != both)
+        options_open();
     prev_buttons = b;
 }

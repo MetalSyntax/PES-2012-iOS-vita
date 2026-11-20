@@ -1326,6 +1326,10 @@ def main():
     if os.path.exists(rf):
         extra = {int(l.split('#')[0], 16) for l in open(rf) if l.split('#')[0].strip()}
         rebases = sorted(set(rebases) | extra)
+    # palabras que la heurística toma por punteros y no lo son (tools/rebase_skip.txt): nunca se rebasean
+    rs = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rebase_skip.txt')
+    if os.path.exists(rs):
+        rebases = sorted(set(rebases) - {int(l.split('#')[0], 16) for l in open(rs) if l.split('#')[0].strip()})
     with open(outdir + '/rebase.bin', 'wb') as f:
         f.write(struct.pack('<2I', 0x31534252, len(rebases)))
         f.write(struct.pack('<%dI' % len(rebases), *rebases))

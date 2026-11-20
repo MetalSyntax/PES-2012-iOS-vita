@@ -304,6 +304,11 @@ Se arranca desde `PES2012_v1.0.2_os30.ipa`: Mach-O armv6 desencriptado (`cryptid
   - **Pendiente**: picos restantes en la ruta ES1/software de IwGx. El juego está pensado para **ES2 en iPhone**
     (app.icf: SysGlesVersion=2; ES1 solo iPad2/Android) y nosotros forzamos ES1 (patch.c). Siguiente paso
     propuesto: exportar GLES2 (shaders GLSL vía vitaGL) para usar la ruta de GPU del juego.
+- **#125** (picos siguen): causa hallada en PES 2011 (su corrida #6, reproducida en hosttest): la tabla de senos
+  u16 de IwGeom en **0x100c37c** tenía 5 palabras rebaseadas (0x100c37c/80/84/88, 0x100c3cc) → sin(1-2°) ≈ 9,5 →
+  SLERP de huesos ×7 → picos. Fix: `tools/rebase_skip.txt` (lo lee `ios_prep.py`); rebase.bin 52779 → 52774.
+  Además: menú SELECT+START de opciones de video copiado de Ferrari GT (`options.c`, `font8x8.c`; `options.txt`
+  reemplaza a `rotation.txt`).
 - Aviso aparte (sin efecto por ahora): `Info.plist` del IPA es XML y el loader solo lee plist binario.
 
 ## PENDIENTE EN CONSOLA (corrida iOS #1)

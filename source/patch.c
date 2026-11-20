@@ -380,7 +380,31 @@ static uint32_t p_s3eFileSetDrivePrefix(const char *prefix, const char *path, ui
     return r;
 }
 
+// IwGx scratch y skin buffer: el binario original pide 320 KB para scratch y 2048 vértices para skinning.
+// Al renderizar varios modelos (jugadores en menús o 22 en partido) y la UI, los buffers se agotaban y
+// el asignador de IwGx (0x179634/0x17969a) reescribía vértices activos con ceros y punteros (#118).
+// Forzar tamaños generosos (8 MB scratch, 32768 vértices skinning) previene el desborde y la colisión.
+static uintptr_t scratch_size_orig;
+static uint32_t p_IwGxSetScratchBufferSize(uint32_t size, uint32_t a1, uint32_t a2, uint32_t a3) {
+    uint32_t new_size = size;
+    if (new_size < 8 * 1024 * 1024)
+        new_size = 8 * 1024 * 1024;
+    l_info("IwGxSetScratchBufferSize(%u) -> %u", (unsigned)size, (unsigned)new_size);
+    return call_guest((void *)scratch_size_orig, new_size, a1, a2, a3);
+}
+
+static uintptr_t skin_size_orig;
+static uint32_t p_IwGxSetSkinBufferSize(uint32_t count, uint32_t a1, uint32_t a2, uint32_t a3) {
+    uint32_t new_count = count;
+    if (new_count < 32768)
+        new_count = 32768;
+    l_info("IwGxSetSkinBufferSize(%u) -> %u", (unsigned)count, (unsigned)new_count);
+    return call_guest((void *)skin_size_orig, new_count, a1, a2, a3);
+}
+
 void patch_init(void) {
+    scratch_size_orig = hook_keep_arm(0xf7314, (void *)p_IwGxSetScratchBufferSize);
+    skin_size_orig = hook_keep_arm(0xfb128, (void *)p_IwGxSetSkinBufferSize);
     setdrive_orig = hook_keep("__Z21s3eFileSetDrivePrefixPKcS0_", (void *)p_s3eFileSetDrivePrefix);
     unixread_orig = hook_keep_arm(0x289964, (void *)p_unixRead);
     fread_orig = hook_keep("_s3eFileRead", (void *)p_s3eFileRead);

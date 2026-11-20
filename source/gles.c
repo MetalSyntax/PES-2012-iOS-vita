@@ -21,6 +21,7 @@
 #include "hle.h"
 #include "imports.h"
 #include "log.h"
+#include "options.h"
 
 #define SCR_W 960
 #define SCR_H 544
@@ -36,6 +37,7 @@
 
 int fb_w = 320, fb_h = 480;
 static GLuint scr_fbo, scr_tex, scr_depth;
+static int scr_filter = -1; // filtro actual de scr_tex (draw_screen)
 
 // ---------------------------------------------------------------- arrays (GL_FIXED -> float)
 
@@ -69,10 +71,14 @@ static struct {
     int size;
 } vbo_copy[MAX_VBO];
 static void *vbo_data(GLuint id) {
+    if (!id)
+        return NULL;
     for (int i = 0; i < MAX_VBO; i++)
         if (vbo_copy[i].id == id)
             return vbo_copy[i].data;
-    return NULL;
+    // In vitaGL, buffer IDs are pointers to vitaGL's internal vbo struct:
+    struct { void *ptr; int32_t size; } *v = (void *)id;
+    return v ? v->ptr : NULL;
 }
 static void g_glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
     TR("BufferData(0x%x, %d, %p, 0x%x)", target, (int)size, data, usage);
@@ -240,6 +246,36 @@ static void g_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     TR("DrawArrays(0x%x, %d, %d)", mode, first, count);
     draw_calls++;
     convert_fixed(first + count);
+    if (arr[A_VTX].type == GL_SHORT && arr[A_VTX].size >= 3) {
+        int vs = arr[A_VTX].stride ? arr[A_VTX].stride : arr[A_VTX].size * type_size(arr[A_VTX].type);
+        uint8_t *vb = (uint8_t *)arr_base(&arr[A_VTX]);
+        if (vb) {
+            int16_t last_valid[3] = {0, 0, 0};
+            int has_valid = 0;
+            for (int i = first; i < first + count; i++) {
+                int16_t *v = (int16_t *)(vb + i * vs);
+                if (abs(v[0]) > 3500 || abs(v[1]) > 3500 || abs(v[2]) > 3500) {
+                    static int bad_arr_log = 0;
+                    if (bad_arr_log++ < 20)
+                        l_error("Sanitized DrawArrays vertex [%d] (%d, %d, %d)", i, v[0], v[1], v[2]);
+                    if (has_valid) {
+                        v[0] = last_valid[0];
+                        v[1] = last_valid[1];
+                        v[2] = last_valid[2];
+                    } else {
+                        if (v[0] > 2500) v[0] = 2500; else if (v[0] < -2500) v[0] = -2500;
+                        if (v[1] > 2500) v[1] = 2500; else if (v[1] < -2500) v[1] = -2500;
+                        if (v[2] > 2500) v[2] = 2500; else if (v[2] < -2500) v[2] = -2500;
+                    }
+                } else {
+                    last_valid[0] = v[0];
+                    last_valid[1] = v[1];
+                    last_valid[2] = v[2];
+                    has_valid = 1;
+                }
+            }
+        }
+    }
     int skinned = skin(first + count);
     glDrawArrays(mode, first, count);
     if (skinned)
@@ -262,6 +298,40 @@ static void g_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void
                 maxi = v;
         }
         convert_fixed(maxi + 1);
+    }
+    // Sanitizador de vértices 3D (GL_SHORT x3): colapsa o clampea coordenadas corruptas (> 3500)
+    // para impedir picos poligonales visuales si algún vértice se daña o se blendió mal.
+    if (arr[A_VTX].type == GL_SHORT && arr[A_VTX].size >= 3) {
+        int vs = arr[A_VTX].stride ? arr[A_VTX].stride : arr[A_VTX].size * type_size(arr[A_VTX].type);
+        uint8_t *vb = (uint8_t *)arr_base(&arr[A_VTX]);
+        const void *ip = bound_element_buffer ? (const uint8_t *)vbo_data(bound_element_buffer) + (uintptr_t)idx : idx;
+        if (vb && ip) {
+            int16_t last_valid[3] = {0, 0, 0};
+            int has_valid = 0;
+            for (int i = 0; i < count; i++) {
+                int v_idx = (type == GL_UNSIGNED_BYTE) ? ((const uint8_t *)ip)[i] : ((const uint16_t *)ip)[i];
+                int16_t *v = (int16_t *)(vb + v_idx * vs);
+                if (abs(v[0]) > 3500 || abs(v[1]) > 3500 || abs(v[2]) > 3500) {
+                    static int bad_log_count = 0;
+                    if (bad_log_count++ < 20)
+                        l_error("Sanitized vertex [%d] (%d, %d, %d) in draw call (count %d)", v_idx, v[0], v[1], v[2], count);
+                    if (has_valid) {
+                        v[0] = last_valid[0];
+                        v[1] = last_valid[1];
+                        v[2] = last_valid[2];
+                    } else {
+                        if (v[0] > 2500) v[0] = 2500; else if (v[0] < -2500) v[0] = -2500;
+                        if (v[1] > 2500) v[1] = 2500; else if (v[1] < -2500) v[1] = -2500;
+                        if (v[2] > 2500) v[2] = 2500; else if (v[2] < -2500) v[2] = -2500;
+                    }
+                } else {
+                    last_valid[0] = v[0];
+                    last_valid[1] = v[1];
+                    last_valid[2] = v[2];
+                    has_valid = 1;
+                }
+            }
+        }
     }
     if (gl_tr && count >= 300 && arr[A_VTX].size) { // muestra de vértices/texcoords del modelo grande
         const uint8_t *vb = arr_base(&arr[A_VTX]), *tb = arr[A_TC0].size ? arr_base(&arr[A_TC0]) : NULL;
@@ -743,6 +813,7 @@ void gles_set_size(int w, int h) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fb_w, fb_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    scr_filter = GL_LINEAR;
     glBindTexture(GL_TEXTURE_2D, 0);
     if (!scr_fbo)
         glGenFramebuffers(1, &scr_fbo);
@@ -761,7 +832,8 @@ void gles_set_size(int w, int h) {
 
 void gles_init(void) {
     vglUseTripleBuffering(GL_FALSE);
-    vglInitExtended(0, SCR_W, SCR_H, GLES_POOL_MB * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
+    options_load(); // MSAA se fija acá (vitaGL lo aplica a la pantalla y a todos los FBO)
+    vglInitExtended(0, SCR_W, SCR_H, GLES_POOL_MB * 1024 * 1024, options_msaa_mode());
     gles_set_size(fb_w, fb_h);
 }
 
@@ -773,16 +845,78 @@ int gles_rotation(void) { return fb_w > fb_h ? 0 : port_rotation; }
 // Rectángulo destino en pantalla (para input.c: mismo mapeo inverso).
 void gles_dest_rect(int *x, int *y, int *w, int *h) {
     int rw = gles_rotation() ? fb_h : fb_w, rh = gles_rotation() ? fb_w : fb_h; // tamaño visto apaisado
-#if PORT_STRETCH
-    (void)rw, (void)rh;
-    *x = 0, *y = 0, *w = SCR_W, *h = SCR_H;
-#else
+    if (opt_stretch) { // options.c (PORT_STRETCH = valor por defecto)
+        *x = 0, *y = 0, *w = SCR_W, *h = SCR_H;
+        return;
+    }
     int dw = SCR_H * rw / rh;
     if (dw > SCR_W)
         dw = SCR_W;
     *w = dw, *h = SCR_H;
     *x = (SCR_W - dw) / 2, *y = 0;
-#endif
+}
+
+static GLuint pre_fbo, pre_tex;
+static int pre_w, pre_h;
+
+static void set_filter(GLuint t, GLint f) {
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+}
+
+// Dibuja el drawable del juego en la pantalla (estado FFP ya preparado por gles_present). Igual que Ferrari GT.
+static void draw_screen(void) {
+    int dx, dy, dw, dh;
+    gles_dest_rect(&dx, &dy, &dw, &dh);
+    int rh = gles_rotation() ? fb_w : fb_h; // alto visto apaisado
+    int k = opt_filter == FILTER_SHARP ? (dh + rh - 1) / rh : 1;
+    GLuint src = scr_tex;
+    GLint want = opt_filter == FILTER_PIXEL || k > 1 ? GL_NEAREST : GL_LINEAR;
+    if (want != scr_filter)
+        set_filter(scr_tex, want), scr_filter = want;
+    static const float unit[] = {0, 0, 1, 0, 0, 1, 1, 1};
+    if (k > 1) { // sharp bilinear: escala entera con vecino más cercano y luego bilinear al tamaño final
+        if (pre_w != fb_w * k || pre_h != fb_h * k) {
+            pre_w = fb_w * k, pre_h = fb_h * k;
+            if (!pre_tex)
+                glGenTextures(1, &pre_tex), glGenFramebuffers(1, &pre_fbo);
+            glBindTexture(GL_TEXTURE_2D, pre_tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pre_w, pre_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            set_filter(pre_tex, GL_LINEAR);
+            glBindFramebuffer(GL_FRAMEBUFFER, pre_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, pre_tex, 0);
+            l_info("sharp bilinear: %dx%d x%d", fb_w, fb_h, k);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, pre_fbo);
+        glViewport(0, 0, pre_w, pre_h);
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glOrthof(0, 1, 0, 1, -1, 1); // misma orientación que scr_tex: sirven las UV de rotación de abajo
+        glBindTexture(GL_TEXTURE_2D, scr_tex);
+        glVertexPointer(2, GL_FLOAT, 0, unit);
+        glTexCoordPointer(2, GL_FLOAT, 0, unit);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glLoadIdentity();
+        glOrthof(0, SCR_W, SCR_H, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, SCR_W, SCR_H);
+        src = pre_tex;
+    }
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    // Esquinas de pantalla (sup-izq, sup-der, inf-izq, inf-der) -> UV del FBO (v = 0 abajo en GL).
+    static const float uv_rot[3][8] = {
+        {0, 1, 1, 1, 0, 0, 1, 0}, // sin girar
+        {1, 1, 1, 0, 0, 1, 0, 0}, // landscape-right (probado en Inotia2)
+        {0, 0, 0, 1, 1, 0, 1, 1}, // landscape-left
+    };
+    const float xy[] = {dx, dy, dx + dw, dy, dx, dy + dh, dx + dw, dy + dh};
+    glBindTexture(GL_TEXTURE_2D, src);
+    glVertexPointer(2, GL_FLOAT, 0, xy);
+    glTexCoordPointer(2, GL_FLOAT, 0, uv_rot[gles_rotation()]);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
 void gles_present(void) {
@@ -840,20 +974,9 @@ void gles_present(void) {
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
-    glClearColor(0, 0, 0, 1);
-    glClear(GL_COLOR_BUFFER_BIT);
-    int dx, dy, dw, dh;
-    gles_dest_rect(&dx, &dy, &dw, &dh);
-    // Esquinas de pantalla (sup-izq, sup-der, inf-izq, inf-der) -> UV del FBO (v = 0 abajo en GL).
-    static const float uv_rot[3][8] = {
-        {0, 1, 1, 1, 0, 0, 1, 0}, // sin girar
-        {1, 1, 1, 0, 0, 1, 0, 0}, // landscape-right (probado en Inotia2)
-        {0, 0, 0, 1, 1, 0, 1, 1}, // landscape-left
-    };
-    const float xy[] = {dx, dy, dx + dw, dy, dx, dy + dh, dx + dw, dy + dh};
-    glVertexPointer(2, GL_FLOAT, 0, xy);
-    glTexCoordPointer(2, GL_FLOAT, 0, uv_rot[gles_rotation()]);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    draw_screen();
+    if (options_pending())
+        options_run(draw_screen);
     vglSwapBuffers(ime_active());
 
     glPopMatrix();
